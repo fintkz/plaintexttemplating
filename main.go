@@ -4,22 +4,43 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"regexp"
+	"strings"
 )
 
-func useragentHandler(w http.ResponseWriter, r *http.Request) {
+func classHandler(w http.ResponseWriter, r *http.Request) {
 	// Get the user agent string from the request header
-	ua := r.Header.Get("User-Agent")
+	ua := r.UserAgent()
 
-	// Write the user agent string to the response
-	fmt.Fprintln(w, "Your user agent is:", ua)
+	// Define the class of the request
+	var class string
+
+	// Check if the user agent string contains "curl" or "Wget"
+	if strings.Contains(ua, "curl") || strings.Contains(ua, "Wget") {
+		// The request is coming from a command-line tool
+		class = "Curl"
+	} else {
+		// Check if the user agent string matches a browser pattern
+		browserRegex := regexp.MustCompile(`(?i)(firefox|chrome|safari|edge|opera|msie)`)
+		if browserRegex.MatchString(ua) {
+			// The request is coming from a browser
+			class = "Browser"
+		} else {
+			// The request is coming from an unknown source
+			class = "Unknown"
+		}
+	}
+
+	// Write the class of the request to the response
+	fmt.Fprintln(w, "Your request is coming from a", class)
 }
 
 func main() {
 	// Create a new ServeMux to handle requests
 	mux := http.NewServeMux()
 
-	// Register the useragentHandler for the /useragent path
-	mux.HandleFunc("/useragent", useragentHandler)
+	// Register the classHandler for the /class path
+	mux.HandleFunc("/api", classHandler)
 
 	// Start the server on port 8080
 	log.Println("Listening on port 8080")
