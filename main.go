@@ -5,10 +5,14 @@ import (
 	"encoding/json"
 	"fmt"
 	"html/template"
-	"io/ioutil"
+	"io"
 	"net/http"
+	"os"
 	"regexp"
 	"strings"
+
+	"golang.org/x/text/cases"
+	"golang.org/x/text/language"
 )
 
 // Story represents a Hacker News story.
@@ -22,15 +26,17 @@ type Story struct {
 	Descendants int    `json:"descendants"` // Number of comments
 }
 
-// fetchTopStoriesIDs fetches the top stories IDs from Hacker News.
-func fetchTopStoriesIDs() ([]int, error) {
-	resp, err := http.Get("https://hacker-news.firebaseio.com/v0/topstories.json?print=pretty")
+// fetchStoriesIDs fetches story IDs from Hacker News based on the story type.
+func fetchStoriesIDs(storyType string) ([]int, error) {
+	// Correctly construct the URL for each story type
+	url := fmt.Sprintf("https://hacker-news.firebaseio.com/v0/%sstories.json?print=pretty", storyType)
+	resp, err := http.Get(url)
 	if err != nil {
 		return nil, err
 	}
 	defer resp.Body.Close()
 
-	body, err := ioutil.ReadAll(resp.Body)
+	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return nil, err
 	}
@@ -60,29 +66,34 @@ func fetchStoryDetails(id int) (*Story, error) {
 	return &story, nil
 }
 
-// UserAgentRegexHandler determines the client's user agent and serves the content accordingly.
-func UserAgentRegexHandler(w http.ResponseWriter, r *http.Request) {
+// UserAgentAndStoryTypeHandler determines the client's user agent and serves the appropriate story type.
+func UserAgentAndStoryTypeHandler(w http.ResponseWriter, r *http.Request) {
 	ua := r.UserAgent()
-
-	var class string
+	class := "Unknown"
 	if strings.Contains(ua, "curl") || strings.Contains(ua, "Wget") {
 		class = "Curl"
 	} else if regexp.MustCompile(`(?i)(firefox|chrome|safari|edge|opera|msie)`).MatchString(ua) {
 		class = "Browser"
-	} else {
-		class = "Unknown"
 	}
 
-	// Fetch top story IDs
-	topStoryIDs, err := fetchTopStoriesIDs()
-	if err != nil || len(topStoryIDs) == 0 {
-		http.Error(w, "Failed to fetch top stories", http.StatusInternalServerError)
+	// Determine story type from URL path
+	storyType := strings.TrimPrefix(r.URL.Path, "/")
+	storyType = strings.TrimSuffix(storyType, "/") // Ensure no trailing slash
+	if storyType != "top" && storyType != "new" && storyType != "best" {
+		http.Error(w, "Invalid story type", http.StatusBadRequest)
 		return
 	}
 
-	// Fetch details for the top 10 stories
+	// Fetch story IDs based on the type
+	storyIDs, err := fetchStoriesIDs(storyType)
+	if err != nil || len(storyIDs) == 0 {
+		http.Error(w, "Failed to fetch stories", http.StatusInternalServerError)
+		return
+	}
+
+	// Fetch details for the top 10 stories of the specified type
 	var stories []Story
-	for _, id := range topStoryIDs[:10] { // Limiting to top 10 stories for brevity
+	for _, id := range storyIDs[:5] { // Limiting to top 10 stories for brevity
 		story, err := fetchStoryDetails(id)
 		if err != nil {
 			continue // Skip stories that fail to fetch
@@ -90,59 +101,69 @@ func UserAgentRegexHandler(w http.ResponseWriter, r *http.Request) {
 		stories = append(stories, *story)
 	}
 
-	// Choose the template based on the user agent
+	titleCaser := cases.Title(language.English)
+	storyTypeTitle := titleCaser.String(storyType) // Use this for your template data
+
+	// Prepare the template based on the class
+	var tpl *template.Template
+	var tplString string
 	if class == "Browser" {
-		htmlTpl := template.Must(template.New("html").Parse(`
+		tplString = `
 <!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<title>Hacker News Top Stories</title>
+<title>Hacker News {{.StoryType}} Stories</title>
 </head>
 <body>
-<h1>Hacker News Top Stories</h1>
+<h1>Hacker News {{.StoryType}} Stories</h1>
 <ul>
-{{range .}}
-    <li><a href="{{.URL}}">{{.Title}}</a> by {{.By}}</li>
+{{range .Stories}}
+	<li><a href="{{.URL}}">{{.Title}}</a> by {{.By}}</li>
 {{end}}
 </ul>
 </body>
 </html>
-`))
-		var buf bytes.Buffer
-		if err := htmlTpl.Execute(&buf, stories); err != nil {
-			http.Error(w, "Failed to generate HTML content", http.StatusInternalServerError)
-			return
-		}
-		w.Header().Set("Content-Type", "text/html")
-		fmt.Fprint(w, buf.String())
-	} else if class == "Curl" {
-		textTpl := template.Must(template.New("text").Parse(`
-Hacker News Top Stories:
-{{range .}}
+`
+	} else {
+		tplString = `Hacker News {{.StoryType}} Stories:
+{{range .Stories}}
 - Title: {{.Title}}
   URL: {{.URL}}
   By: {{.By}}
 {{end}}
-`))
-		var buf bytes.Buffer
-		if err := textTpl.Execute(&buf, stories); err != nil {
-			http.Error(w, "Failed to generate text content", http.StatusInternalServerError)
-			return
-		}
-		w.Header().Set("Content-Type", "text/plain")
-		fmt.Fprint(w, buf.String())
-	} else {
-		http.Error(w, "Unsupported client", http.StatusBadRequest)
+`
 	}
+
+	tpl = template.Must(template.New("webpage").Parse(tplString))
+	var buf bytes.Buffer
+	err = tpl.Execute(&buf, map[string]interface{}{
+		"StoryType": storyTypeTitle,
+		"Stories":   stories,
+	})
+	if err != nil {
+		http.Error(w, "Failed to generate content", http.StatusInternalServerError)
+		return
+	}
+
+	// Set the appropriate content type
+	if class == "Browser" {
+		w.Header().Set("Content-Type", "text/html")
+	} else {
+		w.Header().Set("Content-Type", "text/plain")
+	}
+
+	// Write the output
+	w.Write(buf.Bytes())
 }
 
 func main() {
-	http.HandleFunc("/", UserAgentRegexHandler) // Register the handler function
+	http.HandleFunc("/top", UserAgentAndStoryTypeHandler)
+	http.HandleFunc("/new", UserAgentAndStoryTypeHandler)
+	http.HandleFunc("/best", UserAgentAndStoryTypeHandler)
 
-	// Start the HTTP server on port 8080
 	fmt.Println("Server listening on port 8080")
 	if err := http.ListenAndServe(":8080", nil); err != nil {
-		fmt.Printf("Error starting server: %s\n", err)
+		fmt.Fprintf(os.Stderr, "Error starting server: %s\n", err)
 	}
 }
