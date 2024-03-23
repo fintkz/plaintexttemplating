@@ -1,4 +1,4 @@
-# Hacker News Story Fetcher
+# Plain Text Hacker News
 
 This Go project fetches the top 5 stories from Hacker News based on the specified story type (top, new, or best) and displays them in a user-friendly format. The project provides a simple web server that detects the user agent and renders the stories accordingly.
 
